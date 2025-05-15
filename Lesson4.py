@@ -1,11 +1,11 @@
 # ------------------------------------------------------------------
-# Lesson2.py
+# Lesson4.py
 # This module implements an example of computing a control invariant
-# ellipsoidal set with uncertainty dynamics for a discrete-time 
-# linear system using cvxpy.
+# ellipsoidal set with uncertainty dynamics representing input saturation
+# for a discrete-time linear system using cvxpy.
 #
 # Justin Ganiban
-# 4/23/25
+# 5/15/25
 # ------------------------------------------------------------------
 
 # Section 1: Defining the problem.
@@ -26,16 +26,21 @@ vmax = 1.0
 v_con = np.array([[0, 1],[0, -1]])
 v_bounds = np.array([[vmax, -vmax]])
 
-# Drag uncertainty coefficients
-cd = 1.2
-L = cd*vmax
-
 umax = 2.0
 u_con = np.array([[1],[-1]])
 u_bounds = np.array([[umax], [-umax]])
 
-# Define Uncertainty model: q = Cx+Du, norm(p)<=cd*vmax*norm(q)
-C = np.array([[0, 1]])
+# Define Uncertainty model: p = sat(a)-a, q = Cx+Du = a, norm(p)<=norm(q)
+def saturation(value, lower_bound, upper_bound):
+    if value > upper_bound:
+        return upper_bound
+    elif value < lower_bound:
+        return lower_bound
+    else:
+        return value
+    
+C = np.array([[0, 0]])
+D = np.array([[1]])
 
 # Define the decision variables.
 Q = cp.Variable((An, An),symmetric=True)
@@ -43,7 +48,7 @@ Y = cp.Variable((Bm, Bn))
 nu = cp.Variable()
 
 # Define the decay rate that bounds the Lyapunov function.
-alpha = 0.3
+alpha = 0.05
 
 # ------------------------------------------------------------------
 # Section 2: Set up constraints for cvxpy.
@@ -51,9 +56,9 @@ constraints = []
 
 # Define the Lyapunov LMI constraint.
 lyap_con = cp.bmat([
-    [A@Q + B@Y + Q@A.T + Y.T@B.T + alpha*Q,   nu*E,                        (C@Q).T],
+    [A@Q + B@Y + Q@A.T + Y.T@B.T + alpha*Q,   nu*E,                        (C@Q+D@Y).T],
     [nu*E.T,                                  cp.reshape(-nu, (1, 1)),     cp.Constant([[0]])],
-    [C@Q,                                     cp.Constant([[0]]),          cp.reshape(-nu / (L**2), (1, 1))]
+    [C@Q+D@Y,                                     cp.Constant([[0]]),          cp.reshape(-nu, (1, 1))]
 ])
 constraints += [lyap_con << 0]
 constraints += [nu >= 1e-4]
@@ -84,15 +89,15 @@ for jj in range(len(u_bounds)):
     constraints += [uLMI >> 0]
 
 # Define Objective function: Maximize ellipsoid by max(logdet(Q))
-# objective = cp.Maximize(cp.log_det(Q))
-objective = cp.Minimize(cp.tr_inv(Q))
+objective = cp.Maximize(cp.log_det(Q))
+# objective = cp.Minimize(cp.tr_inv(Q))
 
 # ------------------------------------------------------------------
 # Section 3: Solve the problem.
 prob = cp.Problem(objective, constraints)
 
 print("----------------------------------")
-prob.solve(solver=cp.CLARABEL)
+prob.solve(solver=cp.CLARABEL, verbose=True)
 print("solver status : " + prob.status)
 print("solve time    :" + str(prob.solver_stats.solve_time))
 # print("cost          :" + str(prob.objective.value))
@@ -145,10 +150,11 @@ from scipy.integrate import solve_ivp
 import random
 
 def closed_loop_dynamics(t, x, A, B, K, E):
-    p = cd*vmax*x[1]
     u = K@x
+    
+    u = saturation(u,-2.0,2.0)-u
     # xdot = A@x + B@u + E*p
-    xdot = A@x + np.squeeze(B*u) + 1.5 * np.squeeze(E*p)
+    xdot = A@x + np.squeeze(B*u) 
 
     return xdot
 
@@ -176,9 +182,6 @@ traj = []
 u_traj = np.empty((len(initial_conditions),len(t_vec)))
 for ii in range(len(initial_conditions)):
     traj.append(solve_ivp(closed_loop_dynamics, t_span, initial_conditions[ii],'RK45',t_eval=t_vec, args=(A, B, K, E)))
-    # xjj = traj[ii].y
-    # for jj in range(len(t_vec)):
-        # u_traj[ii,jj] = K@xjj[:,jj]
 
 # Overlay the trajectory in state space with the ellipsoid
 plt.figure(figsize=(6, 6))

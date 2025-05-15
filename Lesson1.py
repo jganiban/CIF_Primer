@@ -24,7 +24,7 @@ vmax = 1.0
 v_con = np.array([[0, 1],[0, -1]])
 v_bounds = np.array([[vmax, -vmax]])
 
-umax = 1.0
+umax = 2.0
 u_con = np.array([[1],[-1]])
 u_bounds = np.array([[umax], [-umax]])
 
@@ -33,7 +33,7 @@ Q = cp.Variable((An, An),symmetric=True)
 Y = cp.Variable((Bm, Bn))
 
 # Define the decay rate that bounds the Lyapunov function.
-alpha = 0.1
+alpha = 0.3
 
 # ------------------------------------------------------------------
 # Section 2: Set up constraints for cvxpy.
@@ -68,8 +68,8 @@ for jj in range(len(u_bounds)):
     constraints += [uLMI >> 0]
 
 # Define Objective function: Maximize ellipsoid by max(logdet(Q))
-# objective = cp.Maximize(cp.log_det(Q))
-objective = cp.Minimize(cp.tr_inv(Q))
+objective = cp.Maximize(cp.log_det(Q))
+# objective = cp.Minimize(cp.tr_inv(Q))
 
 # ------------------------------------------------------------------
 # Section 3: Solve the problem.
@@ -158,9 +158,6 @@ traj = []
 u_traj = np.empty((len(initial_conditions),len(t_vec)))
 for ii in range(len(initial_conditions)):
     traj.append(solve_ivp(closed_loop_dynamics, t_span, initial_conditions[ii],'RK45',t_eval=t_vec, args=(A, B, K)))
-    # xjj = traj[ii].y
-    # for jj in range(len(t_vec)):
-        # u_traj[ii,jj] = K@xjj[:,jj]
 
 # Overlay the trajectory in state space with the ellipsoid
 plt.figure(figsize=(6, 6))
@@ -191,13 +188,17 @@ for ii in range(2*num_traj):
 plt.ylabel('$x^TQ^{-1}x$')
 plt.xlabel('Time (s)')
 plt.grid(True)
+plt.legend()
 plt.show()
 
 # Plot input u vs t
-u_vec = []
 for ii in range(2*num_traj):
     for jj in range(len(t_vec)):
-        u = np.array([[traj[ii].y[0,jj]],[traj[ii].y[1,jj]]])
-        x_lyap[ii,jj] = x.T@np.linalg.inv(Q.value)@x
-    plt.plot(t_vec,x_lyap[ii,:])
+        u_traj[ii,jj] = K@traj[ii].y[:,jj]
+    plt.plot(t_vec,u_traj[ii,:])
+plt.hlines(y=[umax, -umax], xmin=0, xmax=100, colors=['r', 'r'], linestyles='--', label=f'u_max = {umax}')
+plt.ylabel('u (input)')
+plt.xlabel('Time (s)')
+plt.grid(True)
+plt.legend()
 plt.show()
