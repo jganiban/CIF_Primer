@@ -2,7 +2,7 @@
 # Lesson4.py
 # This module implements an example of computing a control invariant
 # ellipsoidal set with uncertainty dynamics representing input saturation
-# for a discrete-time linear system using cvxpy.
+# and drag for a discrete-time linear system using cvxpy.
 #
 # Justin Ganiban
 # 5/15/25
@@ -18,7 +18,7 @@ A = np.array([[0, 1],[0, 0]])
 An, Am = A.shape
 B = np.array([[0],[1]])
 Bn, Bm = B.shape
-E = np.array([[0],[1]])
+E = np.array([[0, 0],[1, 1]])
 En, Em = E.shape
 
 # Define velocity and input constraints - |v| <= vmax, |u| <= umax.
@@ -26,9 +26,10 @@ vmax = 1.0
 v_con = np.array([[0, 1],[0, -1]])
 v_bounds = np.array([[vmax, -vmax]])
 
-umax = 2.0
+umax = 10.0
 u_con = np.array([[1],[-1]])
 u_bounds = np.array([[umax], [-umax]])
+
 
 # Define Uncertainty model: p = sat(a)-a, q = Cx+Du = a, norm(p)<=norm(q)
 def saturation(value, lower_bound, upper_bound):
@@ -39,16 +40,20 @@ def saturation(value, lower_bound, upper_bound):
     else:
         return value
     
-C = np.array([[0, 0]])
-D = np.array([[1]])
+cd = 1.6
+L = np.array([[0.8, 0],[0, cd*vmax]])
+C = np.array([[0, 0],[0, 1]])
+D = np.array([[1],[0]])
 
 # Define the decision variables.
 Q = cp.Variable((An, An),symmetric=True)
 Y = cp.Variable((Bm, Bn))
-nu = cp.Variable()
+nu1 = cp.Variable()
+nu2 = cp.Variable()
+nu = cp.diag(cp.vstack([nu1,nu2]))
 
 # Define the decay rate that bounds the Lyapunov function.
-alpha = 0.05
+alpha = 0.2
 
 # ------------------------------------------------------------------
 # Section 2: Set up constraints for cvxpy.
@@ -56,12 +61,12 @@ constraints = []
 
 # Define the Lyapunov LMI constraint.
 lyap_con = cp.bmat([
-    [A@Q + B@Y + Q@A.T + Y.T@B.T + alpha*Q,   nu*E,                        (C@Q+D@Y).T],
-    [nu*E.T,                                  cp.reshape(-nu, (1, 1)),     cp.Constant([[0]])],
-    [C@Q+D@Y,                                     cp.Constant([[0]]),          cp.reshape(-nu, (1, 1))]
+    [A@Q + B@Y + Q@A.T + Y.T@B.T + alpha*Q,   nu@E,                             (C@Q+D@Y).T],
+    [nu@E.T,                                  cp.reshape(-nu, (2, 2)),          cp.Constant([[0, 0],[0, 0]])],
+    [C@Q+D@Y,                                 cp.Constant([[0, 0],[0, 0]]),     cp.reshape(-nu@(L**(-1)**2), (2, 2))]
 ])
 constraints += [lyap_con << 0]
-constraints += [nu >= 1e-4]
+constraints += [nu >> 1e-4]
 
 # Ensure a positive definite Q.
 constraints += [Q >> 1e-4 * np.eye(An)]
@@ -89,8 +94,8 @@ for jj in range(len(u_bounds)):
     constraints += [uLMI >> 0]
 
 # Define Objective function: Maximize ellipsoid by max(logdet(Q))
-objective = cp.Maximize(cp.log_det(Q))
-# objective = cp.Minimize(cp.tr_inv(Q))
+# objective = cp.Maximize(cp.log_det(Q))
+objective = cp.Minimize(cp.tr_inv(Q))
 
 # ------------------------------------------------------------------
 # Section 3: Solve the problem.
@@ -124,24 +129,24 @@ ellipse_points_rotated = ellipse_points_scaled @ eigvecs.T
 ellipse_points_rotated_low = ellipse_points_scaled_low @ eigvecs.T
 
 # # Plot the ellipsoid.
-# plt.figure(figsize=(6, 6))
-# plt.plot(ellipse_points_rotated[:, 0], ellipse_points_rotated[:, 1], label="Ellipsoid")
+plt.figure(figsize=(6, 6))
+plt.plot(ellipse_points_rotated[:, 0], ellipse_points_rotated[:, 1], label="Ellipsoid")
 
 # # Plot vmax constraint.
-# plt.hlines(y=[vmax, -vmax], xmin=-2000000, xmax = 200000, colors=['r','r'],linestyles=['--','--'], label=f'v_max = {vmax}')
+plt.hlines(y=[vmax, -vmax], xmin=-2000000, xmax = 200000, colors=['r','r'],linestyles=['--','--'], label=f'v_max = {vmax}')
 
 # # Add axes.
-# plt.axhline(0, color='black',linewidth=1)
-# plt.axvline(0, color='black',linewidth=1)
+plt.axhline(0, color='black',linewidth=1)
+plt.axvline(0, color='black',linewidth=1)
 
 # # Adjust aspect ratio and labels.
-# plt.xlim([-np.max(ellipse_points_rotated[:, 0]), np.max(ellipse_points_rotated[:, 0])])
-# plt.title("Control Invariant Ellipsoid with vmax constraint")
-# plt.xlabel("x1 (position)")
-# plt.ylabel("x2 (velocity)")
-# plt.grid(True)
-# plt.legend()
-# plt.show()
+plt.xlim([-np.max(ellipse_points_rotated[:, 0]), np.max(ellipse_points_rotated[:, 0])])
+plt.title("Control Invariant Ellipsoid with vmax constraint")
+plt.xlabel("x1 (position)")
+plt.ylabel("x2 (velocity)")
+plt.grid(True)
+plt.legend()
+plt.show()
 
 # ------------------------------------------------------------------
 # Section 5: Simulate dynamics with IC and optimal K
@@ -151,10 +156,10 @@ import random
 
 def closed_loop_dynamics(t, x, A, B, K, E):
     u = K@x
-    
-    u = saturation(u,-2.0,2.0)-u
+    p = np.array([[0], [cd*vmax*x[1]]])
+    u = saturation(u,-2.0,2.0)
     # xdot = A@x + B@u + E*p
-    xdot = A@x + np.squeeze(B*u) 
+    xdot = A@x + np.squeeze(B*u) - np.squeeze(E@p)
 
     return xdot
 
@@ -201,10 +206,13 @@ plt.xlim([-np.max(ellipse_points_rotated[:, 0])-4, np.max(ellipse_points_rotated
 plt.show()
 
 # Plot input u vs t
+u_sat = np.empty((len(initial_conditions),len(t_vec)))
 for ii in range(2*num_traj):
     for jj in range(len(t_vec)):
         u_traj[ii,jj] = K@traj[ii].y[:,jj]
-    plt.plot(t_vec,u_traj[ii,:])
+        u_sat[ii,jj] = saturation(u_traj[ii,jj],-2,2)
+    # plt.plot(t_vec,u_traj[ii,:])
+    plt.plot(t_vec,u_sat[ii,:])
 plt.hlines(y=[umax, -umax], xmin=0, xmax=100, colors=['r', 'r'], linestyles='--', label=f'u_max = {umax}')
 plt.ylabel('u (input)')
 plt.xlabel('Time (s)')
