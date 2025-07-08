@@ -12,10 +12,10 @@
 import cvxpy as cp
 import numpy as np
 import matplotlib.pyplot as plt
-from sympy import symbols
+from sympy import symbols, lambdify
 from sympy.matrices import Matrix, eye, zeros, ones, diag, GramSchmidt
 from sympy import simplify, cos, sin, atan2, asin, exp, tan
-from scipy.linalg import block_diag
+from scipy.linalg import sqrtm
 
 # Helper function for cross products and euler angle/pqr derivatives
 def skew(v):
@@ -60,13 +60,18 @@ def get_T(e) :
     T[2,2] = cos(phi) / cos(theta)
     return T
 
-# Defining system parameters.
-m = 1
-J_B = 0.01 * np.eye(3) # 1st MOI
-Jx, Jy, Jz = np.diag(J_B)
+def deg2rad(angle):
+    return angle*np.pi/180
 
-r_t = 0.01 # gimbal point unit vector
-g = 1 # unit gravity
+# Defining system parameters.
+m = 2
+# J_B = 0.01 * np.eye(3) # 1st MOI
+# Jx, Jy, Jz = np.diag(J_B)
+
+J_B = np.array([[0.29292, 0, 0],[0, 0.29292, 0],[0, 0, 0.0025]])
+
+r_t = 0.25 # gimbal point unit vector
+g = 1.625 # unit gravity
 
 x = Matrix(symbols('rx ry rz vx vy vz phi theta psi p q r', real=True))
 F = Matrix(symbols('Fx Fy Fz',real=True))
@@ -110,19 +115,124 @@ An, Am = A.shape
 Bn, Bm = B.shape
 
 # Define input constraint.
-umax = 7.0
-umin = -7.0
+Fxy_max = 1.5
+Fxy_min = -1.5
+Fz_max = 5.0
+Fz_min = 0.0
+tau_max = 0.01
+tau_min = -0.01
 
-# Define constraint directions
-u_con = np.vstack([
-    np.eye(Bm),       # u_i ≤ umax
-    -np.eye(Bm)       # -u_i ≤ -umin,  u_i ≥ umin
-])  # shape (2*Bm, Bm)
+# # Define constraint directions
+# u_con = np.vstack([
+#     np.eye(Bm),       # u_i ≤ umax
+#     -np.eye(Bm)       # -u_i ≤ -umin,  u_i ≥ umin
+# ])  # shape (2*Bm, Bm)
 
-u_bounds = np.vstack([
-    umax * np.ones((Bm, 1)),    # upper bounds
-    -umin * np.ones((Bm, 1))    # lower bounds 
-]) 
+# u_bounds = np.vstack([
+#     np.ones((Bm, 1))@np.array([Fxy_max, Fxy_max, Fz_max, tau_max, tau_max, tau_max]).T,    # upper bounds
+#     np.ones((Bm, 1))@np.array([Fxy_min, Fxy_min, Fz_min, tau_min, tau_min, tau_min]).T    # lower bounds 
+# ]) 
+
+u_bounds = np.array([
+    [Fxy_max],     # F_x max
+    [Fxy_max],     # F_y max
+    [Fz_max],     # F_z max
+    [tau_max],    # tau_x max
+    [tau_max],    # tau_y max
+    [tau_max],    # tau_z max
+    [Fxy_max],     # F_x min (negated below)
+    [Fxy_max],     # F_y min
+    [Fz_min],     # F_z min (note: constraint will be one-sided!)
+    [tau_max],    # tau_x min
+    [tau_max],    # tau_y min
+    [tau_max]     # tau_z min
+])
+
+u_con = []
+u_bounds_trimmed = []
+
+# Fx, Fy: symmetric bounds
+for i in range(2):
+    ei = np.zeros((Bm,))
+    ei[i] = 1
+    u_con.append(ei)
+    u_bounds_trimmed.append(1.5)
+    u_con.append(-ei)
+    u_bounds_trimmed.append(1.5)
+
+# Fz: one-sided (upper bound only)
+ei = np.zeros((Bm,))
+ei[2] = 1
+u_con.append(ei)
+u_bounds_trimmed.append(5.0)
+
+# Tau: symmetric bounds
+for i in range(3, 6):
+    ei = np.zeros((Bm,))
+    ei[i] = 1
+    u_con.append(ei)
+    u_bounds_trimmed.append(0.01)
+    u_con.append(-ei)
+    u_bounds_trimmed.append(0.01)
+
+u_con = np.array(u_con)
+u_bounds_trimmed = np.array(u_bounds_trimmed)
+
+# Define state constraints.
+r_max = 8.0
+r_min = -8.0
+v_max = 2.0
+v_min = -2.0
+phimax,thetamax,psimax = deg2rad(30),deg2rad(30),deg2rad(30)
+phimin,thetamin,psimin = -deg2rad(30),-deg2rad(30),-deg2rad(30)
+pmax,qmax,rmax = deg2rad(45),deg2rad(45),deg2rad(45)
+pmin,qmin,rmin = -deg2rad(45),-deg2rad(45),-deg2rad(45)
+
+# Construct state constraint matrix and bounds
+state_con = []
+state_bounds = []
+
+# Position constraints (|r| <= 8)
+for i in range(3):  # x, y, z
+    ei = np.zeros((12,))
+    ei[i] = 1
+    state_con.append(ei)
+    state_bounds.append(r_max)
+    state_con.append(-ei)
+    state_bounds.append(r_max)
+
+# Velocity constraints (|v| <= 2)
+for i in range(3, 6):  # vx, vy, vz
+    ei = np.zeros((12,))
+    ei[i] = 1
+    state_con.append(ei)
+    state_bounds.append(v_max)
+    state_con.append(-ei)
+    state_bounds.append(v_max)
+
+# Euler angle constraints (30 deg)
+angle_limits = np.deg2rad(30)
+for i in range(6, 9):  # phi, theta, psi
+    ei = np.zeros((12,))
+    ei[i] = 1
+    state_con.append(ei)
+    state_bounds.append(phimax)
+    state_con.append(-ei)
+    state_bounds.append(phimax)
+
+# Body rate constraints (±45°/s)
+rate_limits = np.deg2rad(45)
+for i in range(9, 12):  # p, q, r
+    ei = np.zeros((12,))
+    ei[i] = 1
+    state_con.append(ei)
+    state_bounds.append(pmax)
+    state_con.append(-ei)
+    state_bounds.append(pmax)
+
+# Convert to arrays
+state_con = np.array(state_con)
+state_bounds = np.array(state_bounds)
 
 # Define uncertainty dynamics E*p
 E = np.vstack((zeros(3,9),eye(9)))
@@ -159,7 +269,7 @@ row3 = cp.hstack([zeros_36, zeros_34, N1_3])
 N1 = cp.vstack([row1, row2, row3])
 
 # Define N2 - block diagonal LMI for p
-gamma = np.array([0.2, 0.2, 0.2])
+gamma = np.array([ 0.25, 0.25, 0.1])
 
 N2_1 = (gamma[0]**2 * lambda_[0]) * cp.Constant(np.eye(3))
 N2_2 = (gamma[1]**2 * lambda_[1]) * cp.Constant(np.eye(3))
@@ -195,19 +305,44 @@ constraints += [Q >> 1e-6 * np.eye(An)]
 
 # Set up LMI constraint on input. Make sure to account for feedforward force
 u_eq_vec = np.array(u_eq).flatten()
-for jj in range(len(u_bounds)):
-    c_i = u_con[jj, :].reshape((1, Bm))  
-    eq_bias = c_i @ u_eq_vec  
-    d_i_val = u_bounds[jj, 0]**2 - float(eq_bias @ eq_bias.T)
+# for jj in range(len(u_bounds)):
+#     c_i = u_con[jj, :].reshape((1, Bm))  
+#     eq_bias = c_i @ u_eq_vec  
+#     d_i_val = u_bounds[jj, 0]**2 - float(eq_bias @ eq_bias.T)
 
-    Yci = c_i @ Y                         
-    d_i = cp.Constant([[u_bounds[jj,0]**2]])         
+#     Yci = c_i @ Y                         
+#     d_i = cp.Constant([[u_bounds[jj,0]**2]])         
+
+#     uLMI = cp.bmat([
+#         [d_i,     Yci],    
+#         [Yci.T,    Q]         
+#     ])
+#     constraints += [uLMI >> 0]
+
+for jj in range(len(u_bounds_trimmed)):
+    c_i = u_con[jj, :].reshape((1, Bm))        # row vector
+    eq_bias = c_i @ u_eq_vec                   # feedforward shift
+    d_val = u_bounds_trimmed[jj]**2 - float(eq_bias @ eq_bias.T)  # scalar
+
+    d_i = cp.Constant([[d_val]])               # 1x1
+    Yci = c_i @ Y                              # 1x12
 
     uLMI = cp.bmat([
         [d_i,     Yci],    
-        [Yci.T,    Q]         
+        [Yci.T,   Q]
     ])
     constraints += [uLMI >> 0]
+
+# Set up LMI constraint on states.
+for ii in range(len(state_bounds)):
+    a_i = state_con[i].reshape((1,12))
+    b_i = cp.Constant([[state_bounds[ii]**2]])
+    LMI = cp.bmat([
+        [b_i, a_i @ Q],
+        [Q @ a_i.T, Q]
+    ])
+    constraints += [LMI >> 0]
+
 
 # Define Objective function: Maximize ellipsoid by max(logdet(Q))
 objective = cp.Maximize(cp.log_det(Q))
@@ -249,37 +384,48 @@ circle = np.vstack((np.cos(theta), np.sin(theta)))
 scale = np.sqrt(eigvals[:2])
 ellipse_points = eigvecs[:, :2] @ (scale[:, None] * circle)  
 
-# Plot rx, ry
-plt.figure()
-plt.plot(ellipse_points[0, :], ellipse_points[1, :])
-plt.gca().set_aspect('equal')
-plt.title("Ellipsoidal Level Set from Q")
-plt.xlabel("rx")
-plt.ylabel("ry")
-plt.grid(True)
-plt.show()
+# # Plot rx, ry
+# plt.figure()
+# plt.plot(ellipse_points[0, :], ellipse_points[1, :])
+# plt.gca().set_aspect('equal')
+# plt.title("Ellipsoidal Level Set from Q")
+# plt.xlabel("rx")
+# plt.ylabel("ry")
+# plt.grid(True)
+# plt.show()
 
 
 # ------------------------------------------------------------------
 # Section 5: Simulate dynamics with IC and optimal K
 
 from scipy.integrate import solve_ivp
-import random
 
 def closed_loop_dynamics(t, x, A, B, K, u_eq):
     u_eq_vec = np.array(u_eq).flatten()
-    xi = u_eq_vec + K@x
+    xi =  K@x
     xdot = A@x + B@xi
     return xdot
 
+x_sym = x
+u_sym = u
+f_func = lambdify((x_sym, u_sym), f, modules='numpy')
+
+def closed_loop_nonlinear_dynamics(t, x, K, u_eq):
+    u_eq_vec = np.array(u_eq).flatten()
+    u = u_eq_vec + K @ x  # feedback control
+    # u = np.clip(u, umin, umax)  # enforce actuator limits
+    return np.array(f_func(x, u)).flatten()
+
 # Sample initial conditions evenly from the ellipsoid boundary
 initial_conditions = []
-num_traj = 25
+num_traj = 100
 for ii in range(num_traj):
-    x0x = random.choice(ellipse_points[0,:])
-    x0_idx = np.where(ellipse_points[0,:] == x0x)[0]
-    x0y = ellipse_points[1, x0_idx]
-    x0 = np.array([x0x, x0y[0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    z = np.random.randn(12)
+    z /= np.linalg.norm(z)
+    x0 = sqrtm(Q.value).real@z
+    # x0[6:12] = 0.0
+    # x0 = np.zeros((12,))
+
     initial_conditions.append(x0)
 
 t_span = (0, 50)
@@ -288,14 +434,20 @@ t_vec = np.linspace(*t_span, 100)
 traj = []
 u_traj = np.empty((len(initial_conditions),len(t_vec)))
 for ii in range(len(initial_conditions)):
-    traj.append(solve_ivp(closed_loop_dynamics, t_span, initial_conditions[ii],'RK45',t_eval=t_vec, args=(A, B, K, u_eq)))
+    # traj.append(solve_ivp(closed_loop_dynamics, t_span, initial_conditions[ii],'RK45',t_eval=t_vec, args=(A, B, K, u_eq)))
+    traj.append(solve_ivp(closed_loop_nonlinear_dynamics, t_span, initial_conditions[ii],'RK45',t_eval=t_vec, args=(K, u_eq)))
+
+
 
 # Overlay the trajectory in state space with the ellipsoid
 plt.figure(figsize=(6, 6))
 plt.plot(ellipse_points[0,:], ellipse_points[1,:], label="Ellipsoid")
-# plt.plot(ellipse_points[:, 0], ellipse_points[:, 1], label="0.5 Level Set")
 for ii in range(len(initial_conditions)):
     plt.plot(traj[ii].y[0], traj[ii].y[1])
+    if ii == 1:
+        plt.scatter(traj[ii].y[0,0], traj[ii].y[1,0], label="Initial State")
+    else:
+        plt.scatter(traj[ii].y[0,0], traj[ii].y[1,0])
 plt.xlabel("rx")
 plt.ylabel("ry")
 plt.title("Trajectory within Control Invariant Ellipsoid")
@@ -306,8 +458,102 @@ plt.ylim([-np.max(ellipse_points[1,:])-10, np.max(ellipse_points[1,:])+10])
 
 plt.show()
 
+# Scatter terminal state with the ellipsoid
+# plt.figure(figsize=(6, 6))
+# plt.plot(ellipse_points[0,:], ellipse_points[1,:], label="Ellipsoid")
+# for ii in range(len(initial_conditions)):
+#     plt.scatter(traj[ii].y[0,-1], traj[ii].y[1,-1])
+# plt.xlabel("rx")
+# plt.ylabel("ry")
+# plt.title("Trajectory within Control Invariant Ellipsoid")
+# plt.grid(True)
+# plt.legend()
+# # plt.xlim([-np.max(ellipse_points[0,:])-10, np.max(ellipse_points[0,:])+10])
+# # plt.ylim([-np.max(ellipse_points[1,:])-10, np.max(ellipse_points[1,:])+10])
+
+# plt.show()
+
+# Extract Q and get the top-left 3x3 submatrix for position
+Q_val = Q.value
+Q_pos = Q_val[:3, :3]  # Assuming x[0:3] = [rx, ry, rz]
+
+# Eigen-decomposition of Q_pos
+eigvals, eigvecs = np.linalg.eigh(Q_pos)
+idx = np.argsort(eigvals)[::-1]
+eigvals = eigvals[idx]
+eigvecs = eigvecs[:, idx]
+
+# Generate unit sphere
+u = np.linspace(0, 2 * np.pi, 60)
+v = np.linspace(0, np.pi, 30)
+x_s = np.outer(np.cos(u), np.sin(v))
+y_s = np.outer(np.sin(u), np.sin(v))
+z_s = np.outer(np.ones_like(u), np.cos(v))
+
+# Stack and transform each point on the unit sphere
+sphere = np.stack((x_s, y_s, z_s), axis=0).reshape(3, -1)  # shape (3, N)
+scale = np.sqrt(eigvals)[:, None]  # shape (3,1)
+ellipsoid = eigvecs @ (scale * sphere)  # shape (3, N)
+
+# Reshape back to (N, N) for plotting
+x_e = ellipsoid[0, :].reshape(x_s.shape)
+y_e = ellipsoid[1, :].reshape(y_s.shape)
+z_e = ellipsoid[2, :].reshape(z_s.shape)
+
+# # Plot
+# fig = plt.figure()
+# ax = fig.add_subplot(111, projection='3d')
+# ax.set_xlabel('rx')
+# ax.set_ylabel('ry')
+# ax.set_zlabel('rz')
+# ax.set_title('3D Control Invariant Ellipsoid in Position Space')
+# ax.set_box_aspect([1,1,1])  # Equal aspect ratio
+# plt.show()
+
+# Plot 3-D position
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+ax.plot_surface(x_e, y_e, z_e, rstride=1, cstride=1, alpha=0.2)
+for ii in range(len(initial_conditions)):
+    plt.plot(traj[ii].y[0], traj[ii].y[1], traj[ii].y[2])
+    # plt.scatter(traj[ii].y[0,0], traj[ii].y[1,0], traj[ii].y[2,0], label="Initial State")
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_zlabel('Z')
+ax.legend()
+ax.set_aspect('auto')
+plt.show()
+
+state_labels = [
+    'rx', 'ry', 'rz',
+    'vx', 'vy', 'vz',
+    'phi', 'theta', 'psi',
+    'p', 'q', 'r'
+]
+
+def plot_states_vs_time(traj, state_labels):
+    # t = traj.t
+    # x = traj.y  # shape (12, len(t))
+
+    fig, axs = plt.subplots(4, 3, figsize=(15, 10))
+    axs = axs.flatten()
+
+    for j in range(len(traj)):
+        for i in range(12):
+            axs[i].plot(traj[j].t, traj[j].y[i, :])
+            axs[i].set_title(state_labels[i])
+            axs[i].set_xlabel('Time [s]')
+            axs[i].set_ylabel(state_labels[i])
+            axs[i].grid(True)
+
+    plt.tight_layout()
+    plt.suptitle('Rocket States Over Time', y=1.02)
+    plt.show()
+
+plot_states_vs_time(traj, state_labels)
+
 # Plot input u vs t
-# for ii in range(2*num_traj):
+# for ii in range(num_traj):
 #     for jj in range(len(t_vec)):
 #         u_traj[ii,jj] = K@traj[ii].y[:,jj]
 #     plt.plot(t_vec,u_traj[ii,:])
@@ -317,3 +563,46 @@ plt.show()
 # plt.grid(True)
 # plt.legend()
 # plt.show()
+# 
+# from numpy.linalg import norm
+
+# C1 = np.hstack((np.zeros((6,6)),np.vstack((np.eye(3),np.zeros((3,3)))), np.zeros((6,3))))
+# D1 = np.hstack((np.vstack((np.zeros((3,3)),np.eye(3))),np.zeros((6,3))))
+# C2 = np.hstack((np.zeros((4,6)),np.array([[1, 0, 0, 0, 0, 0],[0, 1, 0, 0, 0, 0],[0, 0, 0, 0, 1, 0],[0, 0, 0, 0, 0, 1]])))
+# D2 = np.zeros((4,6))
+# C3 = np.hstack((np.zeros((3,9)),np.eye(3)))
+# D3 = np.zeros((3,6))
+
+# C = np.vstack((C1,C2,C3))
+# D = np.vstack((D1,D2,D3))
+
+# def compute_q(x, u):
+#     return C @ x + D @ u
+
+# def compute_p(x, u):
+#     q = compute_q(x, u)
+#     dx_nl = np.array(f_func(x, u)).flatten()
+#     dx_lin = A @ x + B @ u
+#     resid = dx_nl - dx_lin
+#     return E.T @ resid  # reconstruct the implied p(q)
+
+# filtered_ratios = []
+
+# for _ in range(1000):
+#     x = sqrtm(Q.value).real @ np.random.randn(12)
+#     u = u_eq_vec + K @ x
+#     q = np.array(compute_q(x, u), dtype=np.float64).flatten()
+#     p = np.array(compute_p(x, u), dtype=np.float64).flatten()
+#     norm_q_blocks = [norm(q[0:6]), norm(q[6:10]), norm(q[10:13])]
+#     norm_p_blocks = [norm(p[0:3]), norm(p[3:6]), norm(p[6:9])]
+#     try:
+#         ratio = [norm_p_blocks[i] / (norm_q_blocks[i] + 1e-6) for i in range(3)]
+#         if all(nq > 1e-3 for nq in norm_q_blocks):  # filter
+#             filtered_ratios.append(ratio)
+#     except ZeroDivisionError:
+#         continue
+
+# filtered_ratios = np.array(filtered_ratios)
+# gamma_max = np.percentile(filtered_ratios, 95, axis=0)
+# gamma_safe = 0.9 * gamma_max
+# print("Tuned gamma:", gamma_safe)
